@@ -13,7 +13,7 @@ on:
           - Ot_data_fetch.py
           - purchase_orders.py
       from_date:
-        description: 'Start date (YYYY-MM-DD) [ignored, fixed to 2025-07-26]'
+        description: 'Start date (YYYY-MM-DD) [ignored, fixed to March 1st of current year]'
         required: false
         default: ''
       to_date:
@@ -68,8 +68,8 @@ jobs:
             echo "SCRIPT=${{ github.event.inputs.script_choice }}" >> $GITHUB_ENV
           fi
 
-          # FROM_DATE is fixed to 2025-07-26
-          FROM_DATE="2025-07-26"
+          # FROM_DATE is March 1st of the current year
+          FROM_DATE=$(date +'%Y-03-01')
           echo "FROM_DATE=$FROM_DATE" >> $GITHUB_ENV
 
           # TO_DATE is yesterday
