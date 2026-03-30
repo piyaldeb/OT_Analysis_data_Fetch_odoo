@@ -188,5 +188,7 @@ else:
         worksheet.clear()
         time.sleep(2)
         set_with_dataframe(worksheet, df)
-        worksheet.update("AC1", [[f"{local_time}"]])
+        if worksheet.col_count < 29:
+            worksheet.resize(rows=worksheet.row_count, cols=29)
+        worksheet.update(range_name="AC1", values=[[local_time]])
         log.info(f"✅ Data pasted and timestamp updated in sheet: {key}")
