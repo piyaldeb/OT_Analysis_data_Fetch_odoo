@@ -183,12 +183,16 @@ if df.empty:
     log.info("Skip: DataFrame is empty, not pasting to sheet.")
 else:
     for key in SHEET_KEYS:
-        sheet = client.open_by_key(key)
-        worksheet = sheet.worksheet(WORKSHEET_NAME)
-        worksheet.clear()
-        time.sleep(2)
-        set_with_dataframe(worksheet, df)
-        if worksheet.col_count < 29:
-            worksheet.resize(rows=worksheet.row_count, cols=29)
-        worksheet.update(range_name="AC1", values=[[local_time]])
-        log.info(f"✅ Data pasted and timestamp updated in sheet: {key}")
+        try:
+            sheet = client.open_by_key(key)
+            worksheet = sheet.worksheet(WORKSHEET_NAME)
+            worksheet.clear()
+            time.sleep(2)
+            set_with_dataframe(worksheet, df)
+            if worksheet.col_count < 29:
+                worksheet.resize(rows=worksheet.row_count, cols=29)
+            worksheet.update(range_name="AC1", values=[[local_time]])
+            log.info(f"✅ Data pasted and timestamp updated in sheet: {key}")
+        except Exception as e:
+            log.warning(f"⚠️ Skipped sheet {key} due to error: {e}")
+            continue
