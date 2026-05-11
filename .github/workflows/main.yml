@@ -12,29 +12,34 @@ on:
           - All
           - Ot_data_fetch.py
           - purchase_orders.py
+
       from_date:
         description: 'Start date (YYYY-MM-DD) [ignored, fixed to March 1st of current year]'
         required: false
         default: ''
+
       to_date:
         description: 'End date (YYYY-MM-DD) [ignored, always yesterday]'
         required: false
         default: ''
+
   schedule:
-    - cron: '0 1 * * *'    # 7:00 AM Dhaka (UTC+6)
-    - cron: '30 1 * * *'   # 7:30 AM Dhaka (UTC+6)
-    - cron: '0 3 * * *'    # 9:00 AM Dhaka (UTC+6)
-    - cron: '0 5 * * *'    # 11:00 AM Dhaka (UTC+6)
+    - cron: '0 1 * * *'      # 7:00 AM Dhaka
+    - cron: '30 1 * * *'     # 7:30 AM Dhaka
+    - cron: '0 3 * * *'      # 9:00 AM Dhaka
+    - cron: '0 5 * * *'      # 11:00 AM Dhaka
 
 jobs:
   run_reports:
     runs-on: ubuntu-latest
+
     env:
       ODOO_URL: ${{ secrets.ODOO_URL }}
       USERNAME: ${{ secrets.ODOO_USERNAME }}
       PASSWORD: ${{ secrets.ODOO_PASSWORD }}
       ODOO_DB: ${{ secrets.ODOO_DB }}
       GOOGLE_CREDS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -64,36 +69,38 @@ jobs:
       - name: Determine script to run and dates
         id: script
         run: |
-          # Set script choice
+          # Determine selected script
           if [ "${{ github.event.inputs.script_choice }}" = "" ]; then
-            echo "SCRIPT=All" >> $GITHUB_ENV
+            SCRIPT="All"
           else
-            echo "SCRIPT=${{ github.event.inputs.script_choice }}" >> $GITHUB_ENV
+            SCRIPT="${{ github.event.inputs.script_choice }}"
           fi
 
-          # FROM_DATE is March 1st of the current year
+          echo "script=$SCRIPT" >> $GITHUB_OUTPUT
+
+          # Fixed FROM_DATE = March 1st of current year
           FROM_DATE=$(date +'%Y-03-01')
           echo "FROM_DATE=$FROM_DATE" >> $GITHUB_ENV
 
-          # TO_DATE is yesterday
+          # Fixed TO_DATE = yesterday
           TO_DATE=$(date -d 'yesterday' +'%Y-%m-%d')
           echo "TO_DATE=$TO_DATE" >> $GITHUB_ENV
 
-          # Determine if we run all scripts
-          if [ "${{ github.event.inputs.script_choice }}" = "All" ] || [ -z "${{ github.event.inputs.script_choice }}" ]; then
-            echo "RUN_ALL=true" >> $GITHUB_ENV
+          # Determine if all scripts should run
+          if [ "$SCRIPT" = "All" ]; then
+            echo "run_all=true" >> $GITHUB_OUTPUT
           else
-            echo "RUN_ALL=false" >> $GITHUB_ENV
+            echo "run_all=false" >> $GITHUB_OUTPUT
           fi
 
-      # - name: Run OT Data Fetch
-      #   if: env.SCRIPT == 'Ot_data_fetch.py' || env.RUN_ALL == 'true'
-      #   run: |
-      #     echo "Running OT Data Fetch from $FROM_DATE to $TO_DATE"
-      #     python Ot_data_fetch.py --from_date $FROM_DATE --to_date $TO_DATE
+      - name: Run OT Data Fetch
+        if: steps.script.outputs.script == 'Ot_data_fetch.py' || steps.script.outputs.run_all == 'true'
+        run: |
+          echo "Running OT Data Fetch from $FROM_DATE to $TO_DATE"
+          python Ot_data_fetch.py --from_date $FROM_DATE --to_date $TO_DATE
 
       - name: Run Purchase Orders Fetch
-        if: env.SCRIPT == 'purchase_orders.py' || env.RUN_ALL == 'true'
+        if: steps.script.outputs.script == 'purchase_orders.py' || steps.script.outputs.run_all == 'true'
         run: |
           echo "Running Purchase Orders Fetch from $FROM_DATE to $TO_DATE"
           python purchase_orders.py --from_date $FROM_DATE --to_date $TO_DATE
