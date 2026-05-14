@@ -78,8 +78,10 @@ jobs:
 
           echo "script=$SCRIPT" >> $GITHUB_OUTPUT
 
-          # Fixed FROM_DATE = March 1st of current year
-          FROM_DATE=$(date +'%Y-03-01')
+          # Fixed FROM_DATE = April 1st of current year
+          # (March is skipped because Odoo OT Analysis report crashes
+          # on a duplicate-attendance edge case around March 12.)
+          FROM_DATE=$(date +'%Y-04-01')
           echo "FROM_DATE=$FROM_DATE" >> $GITHUB_ENV
 
           # Fixed TO_DATE = yesterday
