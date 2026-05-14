@@ -679,18 +679,21 @@ if zip_file and cz_file:
         updated_rows = 0
         import gspread.utils as _gsu
 
+        # Use a 1-element list as a mutable cell so we don't need nonlocal/global
+        # (this whole block runs at module top level, not inside a function).
+        _append_state = [append_col]
+
         def _ensure_date_col(col_key):
             """Return the 1-based sheet column for a YYYY-MM-DD key, allocating
             a new appended column (and queuing its header write) if needed."""
-            nonlocal append_col
             if col_key in date_col_idx:
                 return date_col_idx[col_key]
-            if append_col is None:
+            if _append_state[0] is None:
                 return None
-            new_col = append_col
+            new_col = _append_state[0]
             date_col_idx[col_key] = new_col
             appended_dates.append((new_col, col_key))
-            append_col += 1
+            _append_state[0] += 1
             return new_col
 
         # Iterate body rows (after the 4 header rows in merged_df)
@@ -749,7 +752,7 @@ if zip_file and cz_file:
         # date). This excludes any stray legacy date cells far to the right.
         if total_rows and date_col_idx:
             first_date_col = min(date_col_idx.values())
-            last_contig_col = (append_col - 1) if append_col else max(date_col_idx.values())
+            last_contig_col = (_append_state[0] - 1) if _append_state[0] else max(date_col_idx.values())
             for r in total_rows:
                 a1_start = _gsu.rowcol_to_a1(r, first_date_col)
                 a1_end = _gsu.rowcol_to_a1(r, last_contig_col)
