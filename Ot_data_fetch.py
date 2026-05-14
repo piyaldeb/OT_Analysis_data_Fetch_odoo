@@ -22,7 +22,7 @@ REPORT_BUTTON_METHOD = "action_generate_xlsx_report"
 
 # -------- Dates (from GitHub Action inputs or default) --------
 local_tz = pytz.timezone("Asia/Dhaka")
-DATE_FROM_DEFAULT = datetime.now(local_tz).replace(month=3, day=1).strftime("%Y-%m-%d")
+DATE_FROM_DEFAULT = datetime.now(local_tz).replace(month=4, day=1).strftime("%Y-%m-%d")
 DATE_TO_DEFAULT = (datetime.now(local_tz) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 parser = argparse.ArgumentParser()
