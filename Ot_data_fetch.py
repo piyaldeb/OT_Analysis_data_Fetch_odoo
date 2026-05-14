@@ -584,12 +584,52 @@ if zip_file and cz_file:
             raise RuntimeError(f"ZIP_OT_DATA only has {len(existing)} rows; expected header at row 4 and data from row 5. Aborting in-place update.")
 
         sheet_header = existing[3]  # row 4 (0-indexed = 3)
-        # Build: date header text -> 1-based column index in the sheet
+
+        # Normalize a header cell to a YYYY-MM-DD key (or None if not a date).
+        # Sheet headers may be ISO strings ("2026-04-01"), localized strings
+        # ("1-Apr-2026", "01 Apr 2026 Wed"), formatted dates ("4/1/2026"), or
+        # the fetch-side year-less format ("01 Apr Wed"). For the year-less
+        # form, infer the year from DATE_FROM / DATE_TO the same way
+        # smart_fix_dates_in_dataframe does.
+        _from_dt = pd.to_datetime(DATE_FROM)
+        _to_dt = pd.to_datetime(DATE_TO)
+
+        def _date_key(s):
+            if s is None: return None
+            s = str(s).strip()
+            if not s or s in ("Section", "Total", "OT Hours", "OT Cost"):
+                return None
+            for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d %b %Y", "%d %b %Y %a", "%m/%d/%Y", "%d/%m/%Y"):
+                try:
+                    return pd.to_datetime(s, format=fmt).strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    pass
+            # Year-less form like "01 Apr Wed" — infer year
+            m = re.match(r"^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", s, re.IGNORECASE)
+            if m:
+                day = int(m.group(1)); month = m.group(2).title()
+                month_num = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].index(month) + 1
+                if _from_dt.year == _to_dt.year:
+                    year = _from_dt.year
+                elif month_num >= _from_dt.month:
+                    year = _from_dt.year
+                else:
+                    year = _to_dt.year
+                try:
+                    return pd.Timestamp(year=year, month=month_num, day=day).strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    return None
+            try:
+                return pd.to_datetime(s).strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                return None
+
+        # Build: YYYY-MM-DD -> 1-based column index in the sheet
         date_col_idx = {}
         for i, h in enumerate(sheet_header, start=1):
-            h_str = str(h).strip()
-            if h_str and h_str not in ("Section", "Total", "OT Hours", "OT Cost", ""):
-                date_col_idx[h_str] = i
+            key = _date_key(h)
+            if key:
+                date_col_idx[key] = i
 
         # Build: (section, metric) -> 1-based row index in the sheet
         row_idx = {}
@@ -648,8 +688,9 @@ if zip_file and cz_file:
                     continue
                 if pd.isna(val):
                     continue
-                if col_name in date_col_idx:
-                    cell_updates.append((r, date_col_idx[col_name], float(val) if isinstance(val, (int, float)) else val))
+                col_key = _date_key(col_name)
+                if col_key and col_key in date_col_idx:
+                    cell_updates.append((r, date_col_idx[col_key], float(val) if isinstance(val, (int, float)) else val))
                 else:
                     skipped_dates.add(col_name)
             updated_rows += 1
