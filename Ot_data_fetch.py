@@ -35,6 +35,39 @@ DATE_TO = args.to_date
 
 COMPANY_IDS = [1, 3]  # 1 = Zipper, 3 = Metal Trims
 
+# Jobs: each describes one OT report to fetch.
+# - company-mode jobs filter by mode_company_id
+# - category-mode jobs filter by category_id (e.g., C-Zipper Worker = 42)
+JOBS = [
+    {
+        "key": "zipper",
+        "label": "Zipper",
+        "mode_type": "company",
+        "mode_company_id": 1,
+        "category_id": False,
+        "allowed_company_ids": [1],
+        "worksheet": None,  # pushed later as merged Zipper + C-Zipper Worker into ZIP_OT_DATA
+    },
+    {
+        "key": "metal_trims",
+        "label": "Metal_Trims",
+        "mode_type": "company",
+        "mode_company_id": 3,
+        "category_id": False,
+        "allowed_company_ids": [3],
+        "worksheet": "MT_OT_DATA",
+    },
+    {
+        "key": "c_zipper_worker",
+        "label": "C_Zipper_Worker",
+        "mode_type": "category",
+        "mode_company_id": False,
+        "category_id": 42,  # hr.employee.category "C-Zipper Worker"
+        "allowed_company_ids": [4, 1],
+        "worksheet": None,  # not pushed to its own tab; merged into ZIP_OT_DATA in a later step
+    },
+]
+
 # ========= GOOGLE SHEET CONFIG ==========
 SERVICE_ACCOUNT_FILE = "gcreds.json"   # GitHub Action will create this from secret
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -234,9 +267,14 @@ match = re.search(r'var odoo = {\s*csrf_token: "([A-Za-z0-9]+)"', resp.text)
 csrf_token = match.group(1) if match else None
 print("✅ CSRF token =", csrf_token)
 
-# ---------------------- Iterate over companies
-for company_id in COMPANY_IDS:
-    print(f"\n--- Processing company_id {company_id} ---")
+# Track downloaded xlsx per job key so we can merge after the loop
+JOB_FILES = {}
+
+# ---------------------- Iterate over jobs
+for job in JOBS:
+    company_id = job["mode_company_id"] or (job["allowed_company_ids"][0] if job["allowed_company_ids"] else False)
+    job_key = job["key"]
+    print(f"\n--- Processing job {job_key} (mode={job['mode_type']}, company_id={company_id}, category_id={job['category_id']}) ---")
 
     # ---------------------- Step 3: Onchange to get defaults
     onchange_url = f"{ODOO_URL}/web/dataset/call_kw/{MODEL}/onchange"
@@ -257,12 +295,12 @@ for company_id in COMPANY_IDS:
                 "company_all": {}
             }],
             "kwargs": {"context": {"lang": "en_US", "tz": "Asia/Dhaka", "uid": uid,
-                                   "allowed_company_ids": [company_id], "default_is_company": False}}
+                                   "allowed_company_ids": job["allowed_company_ids"], "default_is_company": False}}
         }
     }
     onchange_data = safe_post_json(session, onchange_url, payload=onchange_payload, retries=3, timeout=30)
     if not onchange_data:
-        print(f"❌ Failed to get onchange defaults for company {company_id}. Skipping this company.")
+        print(f"❌ Failed to get onchange defaults for job {job_key}. Skipping this job.")
         continue
     wizard_defaults = onchange_data.get("result", {}).get("value", {})
     print("✅ Onchange defaults:", wizard_defaults)
@@ -283,16 +321,16 @@ for company_id in COMPANY_IDS:
                 "is_company": False,
                 "atten_type": False,
                 "types": False,
-                "mode_type": "company",
+                "mode_type": job["mode_type"],
                 "employee_id": False,
-                "mode_company_id": company_id,
-                "category_id": False,
+                "mode_company_id": job["mode_company_id"],
+                "category_id": job["category_id"],
                 "department_id": False,
                 "company_all": "allcompany"
             }],
             "kwargs": {
                 "context": {"lang": "en_US", "tz": "Asia/Dhaka", "uid": uid,
-                            "allowed_company_ids": [company_id], "default_is_company": False},
+                            "allowed_company_ids": job["allowed_company_ids"], "default_is_company": False},
                 "specification": {
                     "report_type": {}, "date_from": {}, "date_to": {}, "is_company": {},
                     "atten_type": {}, "types": {}, "mode_type": {},
@@ -307,7 +345,7 @@ for company_id in COMPANY_IDS:
     }
     web_save_data = safe_post_json(session, web_save_url, payload=web_save_payload, retries=3, timeout=30)
     if not web_save_data:
-        print(f"❌ Failed to save wizard for company {company_id}. Skipping this company.")
+        print(f"❌ Failed to save wizard for job {job_key}. Skipping this job.")
         continue
 
     # extract wizard id robustly
@@ -319,7 +357,7 @@ for company_id in COMPANY_IDS:
         wizard_id = result_obj.get("id")
     print("✅ Wizard saved, ID =", wizard_id)
     if not wizard_id:
-        print(f"❌ No wizard_id returned for company {company_id}. Skipping.")
+        print(f"❌ No wizard_id returned for job {job_key}. Skipping.")
         continue
 
     # ---------------------- Step 5: Call report button
@@ -333,12 +371,12 @@ for company_id in COMPANY_IDS:
             "method": REPORT_BUTTON_METHOD,
             "args": [[wizard_id]],
             "kwargs": {"context": {"lang": "en_US", "tz": "Asia/Dhaka",
-                                   "uid": uid, "allowed_company_ids": [company_id], "default_is_company": False}}
+                                   "uid": uid, "allowed_company_ids": job["allowed_company_ids"], "default_is_company": False}}
         }
     }
     call_button_data = safe_post_json(session, call_button_url, payload=call_button_payload, retries=3, timeout=60)
     if not call_button_data:
-        print(f"❌ Call button failed for company {company_id}. Skipping.")
+        print(f"❌ Call button failed for job {job_key}. Skipping.")
         continue
     report_info = call_button_data.get("result", {})
     report_name = report_info.get("report_name") or report_info.get("report")
@@ -349,9 +387,9 @@ for company_id in COMPANY_IDS:
     options = {
         "date_from": DATE_FROM,
         "date_to": DATE_TO,
-        "mode_company_id": company_id,
+        "mode_company_id": job["mode_company_id"],
         "department_id": False,
-        "category_id": False,
+        "category_id": job["category_id"],
         "employee_id": False,
         "report_type": "ot_analysis",
         "atten_type": False,
@@ -362,7 +400,7 @@ for company_id in COMPANY_IDS:
         "lang": "en_US",
         "tz": "Asia/Dhaka",
         "uid": uid,
-        "allowed_company_ids": [company_id],
+        "allowed_company_ids": job["allowed_company_ids"],
         "active_model": MODEL,
         "active_id": wizard_id,
         "active_ids": [wizard_id],
@@ -377,15 +415,16 @@ for company_id in COMPANY_IDS:
     }
     headers = {"X-CSRF-Token": csrf_token, "Referer": f"{ODOO_URL}/web"}
 
-    print(f"Attempting download for company {company_id} (up to 5 attempts)...")
+    print(f"Attempting download for job {job_key} (up to 5 attempts)...")
     resp = download_report_with_retries(session, download_url, data=download_payload, headers=headers, max_attempts=5, timeout=120)
 
     if resp and resp.status_code == 200 and ("openxmlformats-officedocument.spreadsheetml.sheet" in resp.headers.get("content-type", "").lower() or resp.content.startswith(b"PK")):
-        company_label = "Zipper" if company_id == 1 else "Metal_Trims"
+        company_label = job["label"]
         filename = f"ot_analysis_{company_label}_{DATE_FROM}_to_{DATE_TO}.xlsx"
         with open(filename, "wb") as f:
             f.write(resp.content)
         print(f"✅ Report downloaded as {filename}")
+        JOB_FILES[job["key"]] = filename
 
         # ---------------------- Step 7: Push to Google Sheets ----------------------
         try:
@@ -407,23 +446,22 @@ for company_id in COMPANY_IDS:
             # Open Google Sheet
             sheet_new = client.open_by_key("1-kBuln5CnKucuHqYG4vvgttJ8DqeJALvr4TjAYuVkXs")
 
-            if company_id == 1:  # Zipper
-                worksheet_new = sheet_new.worksheet("ZIP_OT_DATA")
+            if job["worksheet"]:
+                worksheet_new = sheet_new.worksheet(job["worksheet"])
                 clear_range = "B1:IA1000"
-            else:  # Metal Trims
-                worksheet_new = sheet_new.worksheet("MT_OT_DATA")
-                clear_range = "B1:IA1000"
-            
-            # Clear existing data
-            worksheet_new.batch_clear([clear_range])
-            print(f"✅ Cleared range {clear_range}")
-            
-            # Write dataframe to Google Sheets
-            set_with_dataframe(worksheet_new, df_cost, row=1, col=2, include_index=False, include_column_header=True)
-            print(f"✅ Data pushed to Google Sheets for company {company_id}")
+
+                # Clear existing data
+                worksheet_new.batch_clear([clear_range])
+                print(f"✅ Cleared range {clear_range} on {job['worksheet']}")
+
+                # Write dataframe to Google Sheets
+                set_with_dataframe(worksheet_new, df_cost, row=1, col=2, include_index=False, include_column_header=True)
+                print(f"✅ Data pushed to Google Sheets for job {job_key} ({job['worksheet']})")
+            else:
+                print(f"ℹ️ Job {job_key} downloaded only (no worksheet target); xlsx saved as {filename}")
             
         except Exception as e:
-            print(f"❌ Failed to process/upload data for company {company_id}: {e}")
+            print(f"❌ Failed to process/upload data for job {job_key}: {e}")
             import traceback
             traceback.print_exc()
             continue
@@ -441,3 +479,98 @@ for company_id in COMPANY_IDS:
         continue
 
 print("\n✅ All companies processed.")
+
+# ---------------------- Merge step: Zipper + C-Zipper Worker -> ZIP_OT_DATA
+# Combines the "SectionWise OT" sheet of both xlsx files by summing numeric
+# values per (Section, Metric) row across the matching date columns. Rows that
+# exist in only one file are kept as-is. Pushed to worksheet ZIP_OT_DATA.
+def _merge_sectionwise(zip_path, cz_path):
+    raw_z = pd.read_excel(zip_path, sheet_name="SectionWise OT", header=None)
+    raw_c = pd.read_excel(cz_path, sheet_name="SectionWise OT", header=None)
+
+    # Header layout from inspection:
+    #   row 3 = column headers: ["Section", "<metric label col>", "Total", date columns...]
+    #   row 4 = grand Total (Total OT Hours)
+    #   row 5 = grand Total (Total OT Cost)
+    #   row 6+ = per-section rows, two per section: OT Hours / OT Cost
+    # Column 0 holds section name only on the OT Hours row (NaN on OT Cost row).
+    def _normalize(raw):
+        header = raw.iloc[3].tolist()
+        body = raw.iloc[4:].copy().reset_index(drop=True)
+        body.columns = header
+        # Forward-fill section name down so OT Cost rows know their section
+        body.iloc[:, 0] = body.iloc[:, 0].ffill()
+        # Drop fully empty rows
+        body = body.dropna(how="all").reset_index(drop=True)
+        return header, body
+
+    header_z, body_z = _normalize(raw_z)
+    header_c, body_c = _normalize(raw_c)
+
+    section_col = body_z.columns[0]
+    metric_col = body_z.columns[1]
+
+    # Use Zipper's column order as the canonical schema
+    cols = list(body_z.columns)
+    # Add any extra date columns present in C-Zipper Worker but not in Zipper
+    for c in body_c.columns:
+        if c not in cols:
+            cols.append(c)
+    body_z = body_z.reindex(columns=cols)
+    body_c = body_c.reindex(columns=cols)
+
+    numeric_cols = [c for c in cols if c not in (section_col, metric_col)]
+    for df_ in (body_z, body_c):
+        for c in numeric_cols:
+            df_[c] = pd.to_numeric(df_[c], errors="coerce").fillna(0)
+
+    combined = pd.concat([body_z, body_c], ignore_index=True)
+    grouped = (
+        combined.groupby([section_col, metric_col], as_index=False, sort=False)[numeric_cols].sum()
+    )
+
+    # The Odoo xlsx writes "Total" as an Excel formula (=SUM(date cells)). pandas
+    # reads the cached value 0, so after groupby Total is wrong. Recompute Total
+    # ourselves as the sum of all date columns for each row, then rebuild the
+    # grand "Total" row from the per-section rows.
+    if "Total" in numeric_cols:
+        date_cols = [c for c in numeric_cols if c != "Total"]
+        grouped["Total"] = grouped[date_cols].sum(axis=1)
+
+    mask_total = grouped[section_col] == "Total"
+    section_rows = grouped[~mask_total]
+    for metric_label, metric_name in [("Total OT Hours", "OT Hours"), ("Total OT Cost", "OT Cost")]:
+        sums = section_rows[section_rows[metric_col] == metric_name][numeric_cols].sum()
+        target = mask_total & (grouped[metric_col] == metric_label)
+        if target.any():
+            grouped.loc[target, numeric_cols] = sums.values
+
+    # Re-attach the original top 4 header rows from the Zipper file so the
+    # uploaded sheet keeps the same title/date-header layout.
+    top = raw_z.iloc[:4].copy()
+    top = top.reindex(columns=range(len(cols)))
+    top.columns = cols
+
+    out = pd.concat([top, grouped], ignore_index=True)
+    return out
+
+
+zip_file = JOB_FILES.get("zipper")
+cz_file = JOB_FILES.get("c_zipper_worker")
+if zip_file and cz_file:
+    try:
+        print(f"\n🔀 Merging Zipper + C-Zipper Worker SectionWise OT → ZIP_OT_DATA")
+        merged_df = _merge_sectionwise(zip_file, cz_file)
+        merged_df = smart_fix_dates_in_dataframe(merged_df, DATE_FROM, DATE_TO)
+
+        sheet_new = client.open_by_key("1-kBuln5CnKucuHqYG4vvgttJ8DqeJALvr4TjAYuVkXs")
+        ws = sheet_new.worksheet("ZIP_OT_DATA")
+        ws.batch_clear(["B1:IA1000"])
+        set_with_dataframe(ws, merged_df, row=1, col=2, include_index=False, include_column_header=True)
+        print(f"✅ Merged data pushed to ZIP_OT_DATA ({merged_df.shape})")
+    except Exception as e:
+        print(f"❌ Merge/push failed: {e}")
+        import traceback
+        traceback.print_exc()
+else:
+    print(f"⚠️ Skipping merge: zipper={bool(zip_file)} c_zipper_worker={bool(cz_file)}")
