@@ -565,9 +565,115 @@ if zip_file and cz_file:
 
         sheet_new = client.open_by_key("1-kBuln5CnKucuHqYG4vvgttJ8DqeJALvr4TjAYuVkXs")
         ws = sheet_new.worksheet("ZIP_OT_DATA")
-        ws.batch_clear(["B1:IA1000"])
-        set_with_dataframe(ws, merged_df, row=1, col=2, include_index=False, include_column_header=True)
-        print(f"✅ Merged data pushed to ZIP_OT_DATA ({merged_df.shape})")
+
+        # In-place update only: do NOT add/remove rows, do NOT shift columns.
+        # Strategy:
+        #   1. Read existing sheet header row (date headers) and section/metric rows
+        #      to build (section, metric) -> sheet_row and date_header -> sheet_col maps.
+        #   2. For each date column in merged_df that already exists in the sheet,
+        #      write the new values into the matching cells. Skip dates not present
+        #      in the sheet (downstream consumer expects a fixed column layout).
+        #   3. Skip merged_df rows whose (section, metric) doesn't already exist in
+        #      the sheet for the same reason.
+        # The sheet was originally laid out with set_with_dataframe at row=1, col=2:
+        #   row 1-3 = title/meta rows, row 4 = column headers, row 5+ = data rows
+        #   col B = Section, col C = metric, col D = Total, col E+ = date columns
+
+        existing = ws.get_all_values()
+        if len(existing) < 5:
+            raise RuntimeError(f"ZIP_OT_DATA only has {len(existing)} rows; expected header at row 4 and data from row 5. Aborting in-place update.")
+
+        sheet_header = existing[3]  # row 4 (0-indexed = 3)
+        # Build: date header text -> 1-based column index in the sheet
+        date_col_idx = {}
+        for i, h in enumerate(sheet_header, start=1):
+            h_str = str(h).strip()
+            if h_str and h_str not in ("Section", "Total", "OT Hours", "OT Cost", ""):
+                date_col_idx[h_str] = i
+
+        # Build: (section, metric) -> 1-based row index in the sheet
+        row_idx = {}
+        current_section = ""
+        for r_offset, row in enumerate(existing[4:], start=5):
+            sec = str(row[1]).strip() if len(row) > 1 else ""  # col B
+            metric = str(row[2]).strip() if len(row) > 2 else ""  # col C
+            if sec:
+                current_section = sec
+            if metric:
+                row_idx[(current_section, metric)] = r_offset
+
+        # Now iterate merged_df rows and prepare cell updates
+        merged_cols = [str(c).strip() for c in merged_df.columns]
+        # In merged_df: col 0 = Section, col 1 = metric, col 2 = "Total", col 3+ = dates
+        section_col_pos = 0
+        metric_col_pos = 1
+
+        # Determine the date-column span in the sheet for the SUM formula
+        if date_col_idx:
+            first_date_col = min(date_col_idx.values())
+            last_date_col = max(date_col_idx.values())
+        else:
+            first_date_col = last_date_col = None
+
+        cell_updates = []  # list of (row, col, value)  -- value may be a "=SUM(...)" formula
+        skipped_sections = set()
+        skipped_dates = set()
+        updated_rows = 0
+        import gspread.utils as _gsu
+
+        # Iterate body rows (after the 4 header rows in merged_df)
+        current_section_df = ""
+        for _, mrow in merged_df.iloc[4:].iterrows():
+            sec = str(mrow.iloc[section_col_pos]).strip()
+            metric = str(mrow.iloc[metric_col_pos]).strip()
+            if sec:
+                current_section_df = sec
+            if not metric:
+                continue
+            key = (current_section_df, metric)
+            if key not in row_idx:
+                skipped_sections.add(key)
+                continue
+            r = row_idx[key]
+            for c_pos, col_name in enumerate(merged_cols):
+                if c_pos < 2:
+                    continue  # skip Section, metric (already set)
+                val = mrow.iloc[c_pos]
+                if col_name == "Total":
+                    # Write a live SUM across all date columns in the sheet.
+                    if first_date_col and last_date_col:
+                        a1_start = _gsu.rowcol_to_a1(r, first_date_col)
+                        a1_end = _gsu.rowcol_to_a1(r, last_date_col)
+                        cell_updates.append((r, 4, f"=SUM({a1_start}:{a1_end})"))
+                    continue
+                if pd.isna(val):
+                    continue
+                if col_name in date_col_idx:
+                    cell_updates.append((r, date_col_idx[col_name], float(val) if isinstance(val, (int, float)) else val))
+                else:
+                    skipped_dates.add(col_name)
+            updated_rows += 1
+
+        if skipped_sections:
+            print(f"⚠️ {len(skipped_sections)} (section, metric) keys in fetch not found in sheet — skipped:")
+            for k in sorted(skipped_sections)[:10]:
+                print(f"    {k}")
+        if skipped_dates:
+            print(f"⚠️ {len(skipped_dates)} date columns in fetch not found in sheet — skipped: {sorted(skipped_dates)[:10]}")
+
+        # Apply updates: send formulas with USER_ENTERED so they're parsed,
+        # and plain numbers with USER_ENTERED too (Sheets handles both fine).
+        if cell_updates:
+            batch_payload = []
+            for r, c, v in cell_updates:
+                a1 = _gsu.rowcol_to_a1(r, c)
+                batch_payload.append({"range": a1, "values": [[v]]})
+            CHUNK = 500
+            for i in range(0, len(batch_payload), CHUNK):
+                ws.batch_update(batch_payload[i:i + CHUNK], value_input_option="USER_ENTERED")
+            print(f"✅ Updated {len(cell_updates)} cells across {updated_rows} rows in ZIP_OT_DATA (older date columns preserved).")
+        else:
+            print("⚠️ No cells to update — check that section names and date headers match.")
     except Exception as e:
         print(f"❌ Merge/push failed: {e}")
         import traceback
