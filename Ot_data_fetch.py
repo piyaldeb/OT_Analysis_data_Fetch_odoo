@@ -624,12 +624,31 @@ if zip_file and cz_file:
             except (ValueError, TypeError):
                 return None
 
-        # Build: YYYY-MM-DD -> 1-based column index in the sheet
+        # Build: YYYY-MM-DD -> 1-based column index in the sheet.
+        # The sheet may also contain stray non-contiguous date cells far to
+        # the right (legacy duplicates). Find the rightmost CONTIGUOUS date
+        # column starting from the first date column so we know where to
+        # append new dates without colliding with the legacy cells.
         date_col_idx = {}
         for i, h in enumerate(sheet_header, start=1):
             key = _date_key(h)
             if key:
                 date_col_idx[key] = i
+
+        # Determine append start: scan from first date column to the right
+        # until we hit a non-date cell.
+        if date_col_idx:
+            first_date_col = min(date_col_idx.values())
+            contiguous_end = first_date_col
+            for col in range(first_date_col, len(sheet_header) + 1):
+                cell = sheet_header[col - 1] if col - 1 < len(sheet_header) else ""
+                if _date_key(cell):
+                    contiguous_end = col
+                else:
+                    break
+            append_col = contiguous_end + 1
+        else:
+            append_col = None  # no existing dates; can't append safely
 
         # Build: (section, metric) -> 1-based row index in the sheet
         row_idx = {}
@@ -648,18 +667,31 @@ if zip_file and cz_file:
         section_col_pos = 0
         metric_col_pos = 1
 
-        # Determine the date-column span in the sheet for the SUM formula
-        if date_col_idx:
-            first_date_col = min(date_col_idx.values())
-            last_date_col = max(date_col_idx.values())
-        else:
-            first_date_col = last_date_col = None
+        # SUM formula span: from the first date column to the rightmost
+        # contiguous date column (will expand as we append new dates below).
+        # We compute last_date_col lazily after appends.
 
-        cell_updates = []  # list of (row, col, value)  -- value may be a "=SUM(...)" formula
+        cell_updates = []     # list of (row, col, value)  -- numbers / strings
+        total_rows = []       # rows where we should write =SUM(<first_date>:<last_date>) into col D
         skipped_sections = set()
         skipped_dates = set()
+        appended_dates = []   # newly added date columns we need to write headers for
         updated_rows = 0
         import gspread.utils as _gsu
+
+        def _ensure_date_col(col_key):
+            """Return the 1-based sheet column for a YYYY-MM-DD key, allocating
+            a new appended column (and queuing its header write) if needed."""
+            nonlocal append_col
+            if col_key in date_col_idx:
+                return date_col_idx[col_key]
+            if append_col is None:
+                return None
+            new_col = append_col
+            date_col_idx[col_key] = new_col
+            appended_dates.append((new_col, col_key))
+            append_col += 1
+            return new_col
 
         # Iterate body rows (after the 4 header rows in merged_df)
         current_section_df = ""
@@ -680,17 +712,19 @@ if zip_file and cz_file:
                     continue  # skip Section, metric (already set)
                 val = mrow.iloc[c_pos]
                 if col_name == "Total":
-                    # Write a live SUM across all date columns in the sheet.
-                    if first_date_col and last_date_col:
-                        a1_start = _gsu.rowcol_to_a1(r, first_date_col)
-                        a1_end = _gsu.rowcol_to_a1(r, last_date_col)
-                        cell_updates.append((r, 4, f"=SUM({a1_start}:{a1_end})"))
+                    # Defer SUM formula generation until after appends so the
+                    # range covers any new date columns added below.
+                    total_rows.append(r)
                     continue
                 if pd.isna(val):
                     continue
                 col_key = _date_key(col_name)
-                if col_key and col_key in date_col_idx:
-                    cell_updates.append((r, date_col_idx[col_key], float(val) if isinstance(val, (int, float)) else val))
+                if col_key:
+                    sheet_col = _ensure_date_col(col_key)
+                    if sheet_col:
+                        cell_updates.append((r, sheet_col, float(val) if isinstance(val, (int, float)) else val))
+                    else:
+                        skipped_dates.add(col_name)
                 else:
                     skipped_dates.add(col_name)
             updated_rows += 1
@@ -701,6 +735,25 @@ if zip_file and cz_file:
                 print(f"    {k}")
         if skipped_dates:
             print(f"⚠️ {len(skipped_dates)} date columns in fetch not found in sheet — skipped: {sorted(skipped_dates)[:10]}")
+
+        # Write headers for newly appended date columns (row 4). Sheet stores
+        # dates as datetime cells; USER_ENTERED with ISO YYYY-MM-DD lets Sheets
+        # parse them into real date values (so downstream formulas still work).
+        if appended_dates:
+            for new_col, key in appended_dates:
+                cell_updates.append((4, new_col, key))
+            print(f"➕ Appending {len(appended_dates)} new date columns: {[k for _, k in appended_dates]}")
+
+        # Now resolve Total SUM formulas — span the contiguous date range only
+        # (first date column ... append_col-1, i.e. just past the last contiguous
+        # date). This excludes any stray legacy date cells far to the right.
+        if total_rows and date_col_idx:
+            first_date_col = min(date_col_idx.values())
+            last_contig_col = (append_col - 1) if append_col else max(date_col_idx.values())
+            for r in total_rows:
+                a1_start = _gsu.rowcol_to_a1(r, first_date_col)
+                a1_end = _gsu.rowcol_to_a1(r, last_contig_col)
+                cell_updates.append((r, 4, f"=SUM({a1_start}:{a1_end})"))
 
         # Apply updates: send formulas with USER_ENTERED so they're parsed,
         # and plain numbers with USER_ENTERED too (Sheets handles both fine).
